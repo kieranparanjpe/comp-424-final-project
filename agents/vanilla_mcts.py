@@ -69,8 +69,21 @@ def check_timeout(start, margin):
         raise Timeout()
 
 
+def cheap_endgame(board, reserves, player, ply):
+    """Like check_endgame but only checks for a line and the ply cap; it never generates moves.
+
+    Returns: (is_over, winner, reason), the same shape as check_endgame.
+    """
+    winner = check_winner(board, 3 - player)
+    if winner != 0:
+        return True, winner, "line"
+    if ply >= MAX_PLIES:
+        return True, 0, "ply_cap"
+    return False, 0, ""
+
+
 def score(board, reserves, player, ply):
-    is_over, winner, _ = check_endgame(board, reserves, player, ply)
+    is_over, winner, _ = cheap_endgame(board, reserves, player, ply)
     if is_over:
         return winner
 
@@ -102,6 +115,10 @@ class VanillaMCTS(Agent):
             node.untried_moves = get_valid_moves(node.board, node.reserves, node.player)
             random.shuffle(node.untried_moves)
 
+        if not node.untried_moves and not node.child_by_move:
+            node.update_score(node.opponent)
+            return node.opponent
+
         if not node.untried_moves:
             move = uct_policy(node)
             next_node = node.children[node.child_by_move[move]]
@@ -118,6 +135,9 @@ class VanillaMCTS(Agent):
             while (winner := score(next_b, next_r, player, sim_ply)) is None:
                 check_timeout(self.start, self.margin)
                 sim_move = random_move(next_b, next_r, player)
+                if sim_move is None:
+                    winner = opponent
+                    break
                 execute_move(next_b, next_r, player, sim_move)
                 player, opponent = opponent, player
                 sim_ply += 1
