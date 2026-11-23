@@ -3,6 +3,10 @@ import math
 import random
 from typing import Any
 
+# TODO: remove
+from agents.evaluation_functions import eval_fn1
+from agents.mcts_helpers import Timeout, after, check_timeout, score
+
 from agents.agent import Agent
 from store import register_agent
 from helpers import (Move, get_valid_moves, execute_move, check_winner,
@@ -11,21 +15,8 @@ from constants import *
 import numpy as np
 import time
 
-class Timeout(Exception):
-    pass
-
-def after(board, reserves, player, move):
-    """Return the position after `player` plays `move`. The original arrays are not changed.
-
-    Takes:   board, reserves - the position before the move.
-             player          - the player who moves, 1 or 2.
-             move            - a legal Move for that player.
-    Returns: (board, reserves), new arrays with the move played.
-    Example: b2, r2 = after(board, reserves, 1, Move(None, (0, 0), LARGE))
-    """
-    b, r = copy_state(board, reserves)
-    execute_move(b, r, player, move)
-    return b, r
+SEARCH_DEPTH = 4
+EVAL_FN = eval_fn1 # TODO: put this in line if we submit
 
 
 class Node:
@@ -41,7 +32,7 @@ class Node:
         self.num = 0
         self.untried_moves = None
 
-    def uct(self, c=math.sqrt(2)):
+    def uct(self, c=1.41):
         if self.num <= 0:
             return float('inf')
 
@@ -53,41 +44,14 @@ class Node:
     def value(self):
         return self.wins / self.num if self.num > 0 else 0
 
-    def update_score(self, winner):
+    # winner is player -> to add
+    def update_score(self, winner: dict[int, float]):
         self.num += 1
-        if winner == self.opponent:
-            self.wins += 1
-        if winner == 0:
-            self.wins += 0.5
+        self.wins += winner[self.opponent]
 
 def uct_policy(node: Node) -> Move:
     return max(node.child_by_move.keys(), key=lambda mv: node.children[node.child_by_move[mv]].uct())
 
-
-def check_timeout(start, margin):
-    if time.perf_counter() - start >= STEP_TIME_LIMIT - margin:
-        raise Timeout()
-
-
-def cheap_endgame(board, reserves, player, ply):
-    """Like check_endgame but only checks for a line and the ply cap; it never generates moves.
-
-    Returns: (is_over, winner, reason), the same shape as check_endgame.
-    """
-    winner = check_winner(board, 3 - player)
-    if winner != 0:
-        return True, winner, "line"
-    if ply >= MAX_PLIES:
-        return True, 0, "ply_cap"
-    return False, 0, ""
-
-
-def score(board, reserves, player, ply):
-    is_over, winner, _ = cheap_endgame(board, reserves, player, ply)
-    if is_over:
-        return winner
-
-    return None
 
 @register_agent("VanillaMCTS")
 class VanillaMCTS(Agent):
@@ -102,6 +66,7 @@ class VanillaMCTS(Agent):
         self.margin = 0.05
         self.start = time.perf_counter()
         self.ply = None
+        self.rng = np.random.default_rng()
 
 
     def rollout(self, node, ply=0):
@@ -116,8 +81,9 @@ class VanillaMCTS(Agent):
             random.shuffle(node.untried_moves)
 
         if not node.untried_moves and not node.child_by_move:
-            node.update_score(node.opponent)
-            return node.opponent
+            w = {node.opponent: 1, node.player: 0}
+            node.update_score(w)
+            return w
 
         if not node.untried_moves:
             move = uct_policy(node)
@@ -132,11 +98,11 @@ class VanillaMCTS(Agent):
             next_b, next_r = copy_state(next_b, next_r)
             player, opponent = next_node.player, next_node.opponent
             sim_ply = ply + 1
-            while (winner := score(next_b, next_r, player, sim_ply)) is None:
+            while (winner := score(next_b, next_r, player, sim_ply, sim_ply-ply, SEARCH_DEPTH, EVAL_FN)) is None:
                 check_timeout(self.start, self.margin)
-                sim_move = random_move(next_b, next_r, player)
+                sim_move = random_move(next_b, next_r, player, rng=self.rng)
                 if sim_move is None:
-                    winner = opponent
+                    winner = {player: 0, opponent : 1}
                     break
                 execute_move(next_b, next_r, player, sim_move)
                 player, opponent = opponent, player
@@ -182,7 +148,7 @@ class VanillaMCTS(Agent):
         self.ply += 2
         if not self.current_node.child_by_move:
             self.last_node = None
-            return random_move(board, reserves, player)
+            return random_move(board, reserves, player, rng=self.rng)
 
         move = max(
             self.current_node.child_by_move.keys(),
