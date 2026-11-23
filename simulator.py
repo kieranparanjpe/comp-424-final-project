@@ -148,7 +148,7 @@ class Simulator:
                 logger.info("ply %2d P%d passes", m["ply"], m["player"])
             else:
                 logger.info("ply %2d P%d %s -> %s size %d  (%.3f s) %s", m["ply"], m["player"],
-                            m["src"], m["dest"], m["size"], m["agent_time"], " ".join(m["flags"]))
+                            m["src"], m["dest"], m["size"], m["agent_time"], " ".join(m["flags"]) + " " + (m["detail"] or ""))
         logger.info(record.summary_line())
         if a.display:                                # keep the final board on screen until the window is closed
             import matplotlib.pyplot as plt
