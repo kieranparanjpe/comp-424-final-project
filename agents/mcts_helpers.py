@@ -1,5 +1,8 @@
 import time
 
+import numpy as np
+
+import constants
 from helpers import check_winner, copy_state, execute_move
 from constants import *
 
@@ -18,7 +21,8 @@ def after(board, reserves, player, move):
     Example: b2, r2 = after(board, reserves, 1, Move(None, (0, 0), LARGE))
     """
     b, r = copy_state(board, reserves)
-    execute_move(b, r, player, move)
+    if move is not None:  # None is a pass
+        execute_move(b, r, player, move)
     return b, r
 
 
@@ -27,12 +31,22 @@ def check_timeout(start, margin):
         raise Timeout()
 
 
+def can_place(board, reserves, player):
+    have = np.nonzero(reserves[player])[0]
+    if have.size == 0:
+        return False
+    # The largest reserve size fits where every slot from that size up is empty; obstacle slots are never empty.
+    return bool((board[:, :, have[-1]:] == 0).all(axis=2).any())
+
+
 def cheap_endgame(board, reserves, player, ply):
     winner = check_winner(board, 3 - player)
     if winner != 0:
         return True, winner, "line"
     if ply >= MAX_PLIES:
         return True, 0, "ply_cap"
+    if not constants.ALLOW_MOVES and not can_place(board, reserves, player) and not can_place(board, reserves, 3 - player):
+        return True, 0, "exhausted"
     return False, 0, ""
 
 

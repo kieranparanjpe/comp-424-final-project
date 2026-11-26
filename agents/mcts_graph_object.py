@@ -12,6 +12,7 @@ from store import register_agent
 from helpers import (Move, get_valid_moves, execute_move, check_winner,
                      check_endgame, random_move, copy_state, top_view, state_key)
 from constants import *
+import constants
 import numpy as np
 import time
 
@@ -73,7 +74,7 @@ class GraphMCTSObject(Agent):
         check_timeout(self.start, self.margin)
 
         if state.untried_moves is None:
-            untried = get_valid_moves(state.board, state.reserves, state.player)
+            untried = get_valid_moves(state.board, state.reserves, state.player) or ([None] if not constants.ALLOW_MOVES else [])
             random.shuffle(untried)
             state.untried_moves = untried
 
@@ -105,6 +106,10 @@ class GraphMCTSObject(Agent):
 
                 sim_move = random_move(next_b, next_r, next_player, rng=self.rng)
                 if sim_move is None:
+                    if not constants.ALLOW_MOVES:
+                        next_player, next_opponent = next_opponent, next_player
+                        sim_ply += 1
+                        continue
                     winner = {next_player: 0, next_opponent : 1}
                     break
                 execute_move(next_b, next_r, next_player, sim_move)
@@ -143,8 +148,10 @@ class GraphMCTSObject(Agent):
             state = State(key, board, reserves, player)
             self.state_dict[key] = state
 
+        num_rollouts = 0
         while time.perf_counter() - self.start < STEP_TIME_LIMIT - self.margin:
             try:
+                num_rollouts += 1
                 self.rollout(key, ply=self.ply)
             except Timeout:
                 break
@@ -159,5 +166,5 @@ class GraphMCTSObject(Agent):
             return next_state.num, next_state.wins / next_state.num
 
         move = max(state.tried_moves.keys(), key=select)
-        print(f'wins: {state.wins}, number {state.num}')
+        print(f"Simulated games: {num_rollouts}")
         return move

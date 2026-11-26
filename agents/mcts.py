@@ -12,6 +12,7 @@ from store import register_agent
 from helpers import (Move, get_valid_moves, execute_move, check_winner,
                      check_endgame, random_move, copy_state, top_view, state_key)
 from constants import *
+import constants
 import numpy as np
 import time
 
@@ -77,7 +78,7 @@ class VanillaMCTS(Agent):
         check_timeout(self.start, self.margin)
 
         if node.untried_moves is None:
-            node.untried_moves = get_valid_moves(node.board, node.reserves, node.player)
+            node.untried_moves = get_valid_moves(node.board, node.reserves, node.player) or ([None] if not constants.ALLOW_MOVES else [])
             random.shuffle(node.untried_moves)
 
         if not node.untried_moves and not node.child_by_move:
@@ -102,6 +103,10 @@ class VanillaMCTS(Agent):
                 check_timeout(self.start, self.margin)
                 sim_move = random_move(next_b, next_r, player, rng=self.rng)
                 if sim_move is None:
+                    if not constants.ALLOW_MOVES:
+                        player, opponent = opponent, player
+                        sim_ply += 1
+                        continue
                     winner = {player: 0, opponent : 1}
                     break
                 execute_move(next_b, next_r, player, sim_move)
@@ -139,8 +144,10 @@ class VanillaMCTS(Agent):
             self.current_node = self.last_node.children.get(current_node_key, Node(board, reserves, player, opponent))
             self.current_node.parent = None
 
+        num_rollouts = 0
         while time.perf_counter() - self.start < STEP_TIME_LIMIT - self.margin:
             try:
+                num_rollouts += 1
                 self.rollout(self.current_node, ply=self.ply)
             except Timeout:
                 break
@@ -159,5 +166,5 @@ class VanillaMCTS(Agent):
         )
         self.last_node = self.current_node.children[self.current_node.child_by_move[move]]
         self.last_node.parent = None
-        print(self.current_node.num)
+        print(f"Simulated games: {num_rollouts}")
         return move
