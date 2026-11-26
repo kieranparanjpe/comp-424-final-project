@@ -35,7 +35,7 @@ def can_place(board, reserves, player):
     have = np.nonzero(reserves[player])[0]
     if have.size == 0:
         return False
-    # The largest reserve size fits where every slot from that size up is empty; obstacle slots are never empty.
+
     return bool((board[:, :, have[-1]:] == 0).all(axis=2).any())
 
 
