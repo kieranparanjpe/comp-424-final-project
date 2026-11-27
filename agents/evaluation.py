@@ -1,10 +1,7 @@
-"""Evaluation logic kept separate from the search algorithm."""
+"""Shared evaluation function used by both backends."""
 
-BOARD_SIZE = 4
-NUM_SIZES = 3
-PIECE_SIZES = (0, 1, 2)
-LARGE_SIZE = 2
-NO_SIZE = -1
+from agents.game_state import PIECE_SIZES, NO_SIZE
+
 MATE = 100_000
 DOUBLE_THREAT_MIN = 2
 TOP_PIECE_VALUES = (16, 34, 58)
@@ -21,67 +18,71 @@ LINE_BLOCKED_THREAT_SIZE_WEIGHT = 2
 LINE_BLOCKED_SETUP_BASE = 60
 LINE_CAPPED_WEIGHT = 5
 LINE_CONTESTED_WEIGHT = 4
+LARGE_SIZE = 2
 
-def open_points(n_self, win_len):
-    return OPEN_LINE_SCORES.get(win_len - n_self, 0)
+
+def open_points(count, win_length):
+    return OPEN_LINE_SCORES.get(win_length - count, 0)
+
 
 def evaluate(state, player):
-    my_targets = state._threat_targets(player)
-    if state._can_win(player, my_targets):
+    my_targets = state.threats(player)
+    if state.can_win(player, my_targets):
         return MATE - 1
-    opp = 3 - player
-    opp_targets = state._threat_targets(opp)
-    score = material(state, player) - material(state, opp)
-    score += lines(state, player) - lines(state, opp)
-    if len(opp_targets) >= DOUBLE_THREAT_MIN:
+    opponent = 3 - player
+    opponent_targets = state.threats(opponent)
+    score = material(state, player) - material(state, opponent)
+    score += lines(state, player) - lines(state, opponent)
+    if len(opponent_targets) >= DOUBLE_THREAT_MIN:
         score -= EVAL_MULTI_THREAT_PENALTY
     return max(-EVAL_SCORE_CLAMP, min(EVAL_SCORE_CLAMP, score))
 
+
 def material(state, player):
     score = 0
-    for i in state.playable:
-        top, owner, heat = state.sz[i], state.own[i], state.heat[i]
+    for index in state.playable:
+        top_size, owner, heat = state.sz[index], state.own[index], state.heat[index]
         if owner != player:
             continue
-        base = i * NUM_SIZES
+        base = index * 3
         for size in PIECE_SIZES:
             if state.cells[base + size] == player:
-                if size == top:
+                if size == top_size:
                     score += TOP_PIECE_VALUES[size] + heat * (EVAL_HEAT_BASE + size)
                 else:
                     score += BURIED_PIECE_VALUES[size]
-    reserves = state.res[player]
-    return score + sum(reserves[s] * RESERVE_PIECE_VALUES[s] for s in PIECE_SIZES)
+    return score + sum(state.res[player][size] * RESERVE_PIECE_VALUES[size] for size in PIECE_SIZES)
+
 
 def lines(state, player):
     opponent = 3 - player
     total = threats = 0
     for line_cells in state.line_cells:
-        n_self = n_opp = size_sum = 0
+        own_count = opponent_count = size_sum = 0
         opponent_size = NO_SIZE
-        for i in line_cells:
-            owner = state.own[i]
+        for index in line_cells:
+            owner = state.own[index]
             if owner == player:
-                n_self += 1
-                size_sum += state.sz[i] + 1
+                own_count += 1
+                size_sum += state.sz[index] + 1
             elif owner == opponent:
-                n_opp += 1
-                opponent_size = state.sz[i]
-        if n_self == 0:
+                opponent_count += 1
+                opponent_size = state.sz[index]
+        if own_count == 0:
             continue
-        if n_opp == 0:
-            total += open_points(n_self, state.W) + size_sum * LINE_OPEN_SIZE_WEIGHT
-            if n_self == state.W - 1:
+        if opponent_count == 0:
+            total += open_points(own_count, state.W) + size_sum * LINE_OPEN_SIZE_WEIGHT
+            if own_count == state.W - 1:
                 threats += 1
-        elif n_opp == 1 and opponent_size < LARGE_SIZE and n_self == state.W - 1:
+        elif opponent_count == 1 and opponent_size < LARGE_SIZE and own_count == state.W - 1:
             total += LINE_BLOCKED_THREAT_BASE + size_sum * LINE_BLOCKED_THREAT_SIZE_WEIGHT
             threats += 1
-        elif n_opp == 1 and opponent_size < LARGE_SIZE and n_self == state.W - 2:
+        elif opponent_count == 1 and opponent_size < LARGE_SIZE and own_count == state.W - 2:
             total += LINE_BLOCKED_SETUP_BASE + size_sum
-        elif n_opp == 1 and opponent_size >= LARGE_SIZE:
-            total += LINE_CAPPED_WEIGHT * n_self
-        elif n_self > n_opp:
-            total += LINE_CONTESTED_WEIGHT * n_self
+        elif opponent_count == 1 and opponent_size >= LARGE_SIZE:
+            total += LINE_CAPPED_WEIGHT * own_count
+        elif own_count > opponent_count:
+            total += LINE_CONTESTED_WEIGHT * own_count
     if threats >= DOUBLE_THREAT_MIN:
         total += EVAL_DOUBLE_THREAT_BONUS
     return total

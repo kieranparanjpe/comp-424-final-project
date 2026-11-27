@@ -1,22 +1,25 @@
-"""Student agent: iterative-deepening negamax with alpha-beta pruning."""
+"""Student agent: shared iterative-deepening negamax alpha-beta search."""
 
 import time
 
 import constants
 from agents.agent import Agent
-from agents.game_state import COORDS, PLACEMENT_SRC, GameStateMixin
-from agents.move_ordering import MoveOrderingMixin
-from helpers import Move, check_move_validity, get_valid_moves
+from agents.game_state import CustomBackend
+from agents.original_backend import OriginalBackend
+from agents.move_ordering import MoveOrdering
+from helpers import check_move_validity, get_valid_moves
 from store import register_agent
 from agents import evaluation
 
-USE_CUSTOM_MOVE_GENERATION = False
+# False uses the framework helpers directly; True uses the optimized backend.
+USE_CUSTOM_HELPERS = True
 
 DEFAULT_MAX_PLIES = 100
 TIME_MARGIN = 0.25
 SOFT_TIME_RATIO = 0.45
 MIN_SEARCH_BUDGET = 0.05
 MAX_SEARCH_DEPTH = 32
+MAX_TT_ENTRIES = 250_000
 TIME_CHECK_MASK = 63
 ENDGAME_TT_PLY_THRESHOLD = 14
 IMMEDIATE_WIN_DEPTH = 64
@@ -27,51 +30,74 @@ EXACT, LOWER, UPPER = 0, 1, 2
 
 
 class _TimeUp(Exception):
-    """Raised when the search reaches its time deadline."""
+    pass
 
 
 @register_agent("student_agent")
-class StudentAgent(GameStateMixin, MoveOrderingMixin, Agent):
-    """Runs iterative deepening and negamax alpha-beta on a compact board state."""
+class StudentAgent(Agent):
+    """Runs one search implementation over either of the two game backends."""
 
     def __init__(self):
         super().__init__()
         self.name = "StudentAgent"
-        self.use_custom_move_generation = USE_CUSTOM_MOVE_GENERATION
+        self.use_custom_helpers = USE_CUSTOM_HELPERS
+        self.ordering = MoveOrdering()
         self.last_depth = 0
         self.last_score = 0
         self.last_nodes = 0
         self.turn_count = 0
         self.tt = {}
-        self._tt_sig = None
+        self._tt_backend = None
 
     def step(self, board, reserves, player, opponent):
         start = time.perf_counter()
-        saved_b = board.copy()
-        saved_r = reserves.copy()
         current_ply = 2 * self.turn_count + (int(player) - 1)
         self.turn_count += 1
         max_plies = int(getattr(constants, "MAX_PLIES", DEFAULT_MAX_PLIES))
         move = self._choose(board, reserves, player, start, max(0, max_plies - current_ply))
-        if move is not None and check_move_validity(saved_b, saved_r, player, move):
+
+        elapsed = time.perf_counter() - start
+
+        print(
+            f"Backend: {type(self.state).__name__} | "
+            f"Time: {elapsed:.4f}s | "
+            f"Nodes: {self.last_nodes} | "
+            f"Depth: {self.last_depth}"
+        )
+
+        if move is not None and check_move_validity(board, reserves, player, move):
             return move
-        legal = get_valid_moves(saved_b, saved_r, player)
-        if not legal:
+        legal_moves = get_valid_moves(board, reserves, player)
+        if not legal_moves:
             raise RuntimeError("step() was called when the player has no legal moves")
-        return legal[0]
+
+        return legal_moves[0]
 
     def _choose(self, board, reserves, player, start, plies_left=DEFAULT_MAX_PLIES):
-        self._prepare(board, reserves, player)
+        if self.use_custom_helpers:
+            self.state = CustomBackend(board, reserves, player)
+            backend_name = "custom"
+        else:
+            self.state = OriginalBackend(board, reserves, player)
+            backend_name = "original"
+        signature = (backend_name, int(constants.WIN_LENGTH), bool(constants.ALLOW_MOVES))
+        if self._tt_backend != signature or len(self.tt) > MAX_TT_ENTRIES:
+            self.tt.clear()
+            self._tt_backend = signature
+
+        self.nodes = 0
         self.plies_left = max(0, int(plies_left))
         budget = max(MIN_SEARCH_BUDGET, constants.STEP_TIME_LIMIT - TIME_MARGIN)
         self.deadline = start + budget
         soft_deadline = start + budget * SOFT_TIME_RATIO
-        moves = self._gen_moves(player)
+        moves = self.state.get_valid_moves(player)
         if not moves:
             raise RuntimeError("no legal moves")
-        ordered = self._order(player, moves, None, 0)
+
+        ordered = self.ordering.order(self.state, player, moves, None, 0)
         best = ordered[0]
         self.last_depth = 0
+
         for depth in range(1, min(MAX_SEARCH_DEPTH, self.plies_left + 1)):
             now = time.perf_counter()
             if now >= self.deadline or (depth > 1 and now >= soft_deadline):
@@ -92,54 +118,62 @@ class StudentAgent(GameStateMixin, MoveOrderingMixin, Agent):
                 self.last_score = score
             if score is not None and abs(score) > MATE_TH:
                 break
-            ordered = self._order(player, moves, best, 0)
+            ordered = self.ordering.order(self.state, player, moves, best, 0)
+
         self.last_nodes = self.nodes
-        return self._as_move(best)
+        return best
 
-    def _adjust(self, val):
-        if val > MATE_TH:
-            return val - 1
-        if val < -MATE_TH:
-            return val + 1
-        return val
+    @staticmethod
+    def _adjust(value):
+        if value > MATE_TH:
+            return value - 1
+        if value < -MATE_TH:
+            return value + 1
+        return value
 
-    def _tt_key(self, plies_left):
-        return self.z if plies_left > ENDGAME_TT_PLY_THRESHOLD else (self.z, plies_left)
+    def _tt_key(self, player, plies_left):
+        key = self.state.key(player)
+        return key if plies_left > ENDGAME_TT_PLY_THRESHOLD else (key, plies_left)
 
     def _search_root(self, depth, player, moves):
         alpha, beta = -INF, INF
         alpha0 = alpha
         best, best_move = -INF, None
-        opp = 3 - player
-        key = self._tt_key(self.plies_left)
-        for m in moves:
+        opponent = 3 - player
+        key = self._tt_key(player, self.plies_left)
+
+        for move in moves:
             if time.perf_counter() >= self.deadline:
                 raise _TimeUp
-            token = self.apply(player, *m)
+            token = self.state.apply(player, move)
             won = revealed = False
-            val = 0
+            value = 0
             try:
-                w = self._terminal(player)
-                if w == player:
+                winner = self.state.terminal(player)
+                if winner == player:
                     won = True
-                elif w == opp:
+                elif winner == opponent:
                     revealed = True
                 elif self.plies_left <= 1:
-                    val = 0
+                    value = 0
                 else:
-                    val = self._adjust(-self._negamax(depth - 1, -beta, -alpha, opp, 1, self.plies_left - 1))
+                    value = self._adjust(
+                        -self._negamax(depth - 1, -beta, -alpha, opponent, 1, self.plies_left - 1)
+                    )
             finally:
-                self.undo(token)
+                self.state.undo(token)
+
             if won:
-                self.tt[key] = (depth, MATE - 1, EXACT, m)
-                return MATE - 1, m
+                self.tt[key] = (depth, MATE - 1, EXACT, move)
+                return MATE - 1, move
             if revealed:
                 continue
-            if val > best:
-                best, best_move = val, m
-            if val > alpha:
-                alpha = val
+            if value > best:
+                best, best_move = value, move
+            if value > alpha:
+                alpha = value
             self._root_partial = (best, best_move)
+
         if best_move is None:
             self.tt[key] = (depth, -(MATE - 1), EXACT, moves[0])
             return -(MATE - 1), moves[0]
@@ -153,57 +187,66 @@ class StudentAgent(GameStateMixin, MoveOrderingMixin, Agent):
             raise _TimeUp
         if plies_left <= 0:
             return 0
+
         alpha0 = alpha
-        key = self._tt_key(plies_left)
-        tt = self.tt.get(key)
+        key = self._tt_key(player, plies_left)
+        entry = self.tt.get(key)
         tt_move = None
-        if tt is not None:
-            tdepth, tscore, tflag, tt_move = tt
-            if tdepth >= depth:
-                if tflag == EXACT or (tflag == LOWER and tscore >= beta) or (tflag == UPPER and tscore <= alpha):
-                    return tscore
+        if entry is not None:
+            tt_depth, tt_score, tt_flag, tt_move = entry
+            if tt_depth >= depth:
+                if tt_flag == EXACT or (tt_flag == LOWER and tt_score >= beta) or (tt_flag == UPPER and tt_score <= alpha):
+                    return tt_score
+
         if depth <= 0:
-            return evaluation.evaluate(self, player)
-        my_targets = self._threat_targets(player)
-        if self._can_win(player, my_targets):
+            return evaluation.evaluate(self.state, player)
+
+        my_targets = self.state.threats(player)
+        if self.state.can_win(player, my_targets):
             self.tt[key] = (IMMEDIATE_WIN_DEPTH, MATE - 1, EXACT, tt_move)
             return MATE - 1
-        moves = self._gen_moves(player)
+
+        moves = self.state.get_valid_moves(player)
         if not moves:
             return -(MATE - 1)
-        moves = self._order(player, moves, tt_move, ply, my_targets)
+        moves = self.ordering.order(self.state, player, moves, tt_move, ply, my_targets)
+
         best, best_move = -INF, None
-        opp = 3 - player
-        for m in moves:
-            token = self.apply(player, *m)
+        opponent = 3 - player
+        for move in moves:
+            token = self.state.apply(player, move)
             won = revealed = False
-            val = 0
+            value = 0
             try:
-                w = self._terminal(player)
-                if w == player:
+                winner = self.state.terminal(player)
+                if winner == player:
                     won = True
-                elif w == opp:
+                elif winner == opponent:
                     revealed = True
                 elif plies_left <= 1:
-                    val = 0
+                    value = 0
                 else:
-                    val = self._adjust(-self._negamax(depth - 1, -beta, -alpha, opp, ply + 1, plies_left - 1))
+                    value = self._adjust(
+                        -self._negamax(depth - 1, -beta, -alpha, opponent, ply + 1, plies_left - 1)
+                    )
             finally:
-                self.undo(token)
+                self.state.undo(token)
+
             if won:
-                self._killer(ply, m)
-                self.tt[key] = (depth, MATE - 1, EXACT, m)
+                self.ordering.record_killer(ply, move)
+                self.tt[key] = (depth, MATE - 1, EXACT, move)
                 return MATE - 1
             if revealed:
                 continue
-            if val > best:
-                best, best_move = val, m
-            if val > alpha:
-                alpha = val
+            if value > best:
+                best, best_move = value, move
+            if value > alpha:
+                alpha = value
             if alpha >= beta:
-                self._killer(ply, m)
-                self._bump_hist(player, m, depth)
+                self.ordering.record_killer(ply, move)
+                self.ordering.record_history(player, move, depth)
                 break
+
         if best_move is None:
             score = -(MATE - 1)
             self.tt[key] = (depth, score, EXACT, moves[0])
@@ -211,8 +254,3 @@ class StudentAgent(GameStateMixin, MoveOrderingMixin, Agent):
         flag = UPPER if best <= alpha0 else (LOWER if best >= beta else EXACT)
         self.tt[key] = (depth, best, flag, best_move)
         return best
-
-    def _as_move(self, packed):
-        src, dest, size = packed
-        start = COORDS[src] if src != PLACEMENT_SRC else None
-        return Move(start, COORDS[dest], size)

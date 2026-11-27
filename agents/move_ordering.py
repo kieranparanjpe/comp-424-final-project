@@ -1,13 +1,9 @@
-"""Move-ordering scores and killer/history heuristics."""
+"""Shared move-ordering heuristics for either backend."""
 
-NUM_CELLS = 16
-NUM_SIZES = 3
-PLAYER_2 = 2
-PLACEMENT_SRC = -1
-EMPTY = 0
+from agents.game_state import COORD_TO_INDEX, PLACEMENT_SRC, EMPTY
+
 MAX_KILLER_PLY = 48
 MAX_HISTORY_SCORE = 1_000_000
-
 ORDER_TT_MOVE = 50_000_000
 ORDER_WIN_THREAT = 20_000_000
 ORDER_KILLER = 5_000_000
@@ -23,62 +19,58 @@ ORDER_SRC_HEAT_PENALTY = 20
 ORDER_PLACEMENT_BONUS = 80
 
 
-class MoveOrderingMixin:
-    """Initializes and applies the search's move-ordering heuristics."""
-
-    def _reset_move_ordering(self):
+class MoveOrdering:
+    def __init__(self):
         self.killers = [[None, None] for _ in range(MAX_KILLER_PLY)]
-        self.hist = [
-            [[[0] * NUM_SIZES for _ in range(NUM_CELLS)] for _ in range(NUM_CELLS + 1)]
-            for _ in range(PLAYER_2 + 1)
+        self.history = [
+            [[[0] * 3 for _ in range(16)] for _ in range(17)]
+            for _ in range(3)
         ]
 
-    def _order(self, player, moves, tt_move, ply, my_targets=None):
-        opp = 3 - player
-        my_t = set(self._threat_targets(player) if my_targets is None else my_targets)
-        opp_t = set(self._threat_targets(opp))
-        heat, own, sz = self.heat, self.own, self.sz
-        hist = self.hist[player]
+    def order(self, state, player, moves, tt_move, ply, my_targets=None):
+        opponent = 3 - player
+        my_targets = set(state.threats(player) if my_targets is None else my_targets)
+        opponent_targets = set(state.threats(opponent))
         killer = self.killers[ply] if ply < len(self.killers) else (None, None)
         scored = []
-        for m in moves:
-            src, dest, size = m
-            sc = 0
-            if tt_move is not None and m == tt_move:
-                sc += ORDER_TT_MOVE
-            if dest in my_t:
-                sc += ORDER_WIN_THREAT
-            if m == killer[0] or m == killer[1]:
-                sc += ORDER_KILLER
-            if dest in opp_t:
-                sc += ORDER_BLOCK_THREAT
-            od = own[dest]
-            if od == opp:
-                sc += (
-                    ORDER_CAPTURE_BASE
-                    + sz[dest] * ORDER_CAPTURE_TARGET_SIZE
-                    - size * ORDER_CAPTURE_SELF_SIZE_PENALTY
-                )
-            elif od == EMPTY:
-                sc += ORDER_EMPTY_BASE + size * ORDER_EMPTY_SIZE_BONUS
-            else:
-                sc += ORDER_SELF_STACK
-            sc += heat[dest] * ORDER_DEST_HEAT_BONUS + (
-                -heat[src] * ORDER_SRC_HEAT_PENALTY
-                if src != PLACEMENT_SRC
-                else ORDER_PLACEMENT_BONUS
-            )
-            sc += min(hist[src + 1][dest][size], MAX_HISTORY_SCORE)
-            scored.append((sc, m))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [m for _, m in scored]
 
-    def _killer(self, ply, move):
+        for move in moves:
+            src = PLACEMENT_SRC if move.src is None else COORD_TO_INDEX[move.src]
+            dest = COORD_TO_INDEX[move.dest]
+            size = move.size
+            score = 0
+            if move == tt_move:
+                score += ORDER_TT_MOVE
+            if dest in my_targets:
+                score += ORDER_WIN_THREAT
+            if move == killer[0] or move == killer[1]:
+                score += ORDER_KILLER
+            if dest in opponent_targets:
+                score += ORDER_BLOCK_THREAT
+
+            dest_owner = state.own[dest]
+            if dest_owner == opponent:
+                score += ORDER_CAPTURE_BASE + state.sz[dest] * ORDER_CAPTURE_TARGET_SIZE - size * ORDER_CAPTURE_SELF_SIZE_PENALTY
+            elif dest_owner == EMPTY:
+                score += ORDER_EMPTY_BASE + size * ORDER_EMPTY_SIZE_BONUS
+            else:
+                score += ORDER_SELF_STACK
+
+            score += state.heat[dest] * ORDER_DEST_HEAT_BONUS
+            score += -state.heat[src] * ORDER_SRC_HEAT_PENALTY if src != PLACEMENT_SRC else ORDER_PLACEMENT_BONUS
+            score += min(self.history[player][src + 1][dest][size], MAX_HISTORY_SCORE)
+            scored.append((score, move))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [move for _, move in scored]
+
+    def record_killer(self, ply, move):
         if ply < len(self.killers) and self.killers[ply][0] != move:
             self.killers[ply][1] = self.killers[ply][0]
             self.killers[ply][0] = move
 
-    def _bump_hist(self, player, move, depth):
-        src, dest, size = move
-        row = self.hist[player][src + 1][dest]
-        row[size] = min(row[size] + depth * depth, MAX_HISTORY_SCORE)
+    def record_history(self, player, move, depth):
+        src = PLACEMENT_SRC if move.src is None else COORD_TO_INDEX[move.src]
+        dest = COORD_TO_INDEX[move.dest]
+        row = self.history[player][src + 1][dest]
+        row[move.size] = min(row[move.size] + depth * depth, MAX_HISTORY_SCORE)
